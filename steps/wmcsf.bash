@@ -1,0 +1,120 @@
+#!/bin/bash
+
+#SBATCH --job-name=wmcsf              #a convenient name for your job
+#SBATCH --mem=3G                      #max memory per node
+#SBATCH --partition=luna-cpu-short    #using luna short queue
+#SBATCH --cpus-per-task=1      	  #max CPU cores per process
+#SBATCH --time=0:05:00                #time limit (H:MM:SS)
+#SBATCH --qos=anw-cpu                 #use anw-cpu's
+#SBATCH --output=logs/slurm-%x.%j.out
+
+
+#======================================================================
+#                      WM/CSF NUISANCE TIMESERIES
+#======================================================================
+
+#@author: Tommy Broeders
+#@email:  t.broeders@amsterdamumc.nl
+#updated: 30 11 2023
+#status: still being developed
+#to-do: 
+
+#Review History
+#Reviewed by -
+
+# Description:
+# - This code is part of the "KNW-Connect Processing Pipeline".
+#   It will create white-matter and CSF nuisance timeseries.
+#
+# - Prerequisites: FSL tools enabled
+# - Input: Subject (+session) ID
+# - Output: WM/CSF nuisance timeseries
+#----------------------------------------------------------------------
+
+#Input variables
+FULLID_folder=$1
+FULLID_file=$2
+fmrifeat=func/${FULLID_folder}/fmri.feat
+
+#Check if script has already been completed
+[ -f func/${FULLID_folder}/nuisance/nuisance_timeseries ] && exit 0
+
+#Create output folder
+mkdir -p func/${FULLID_folder}/nuisance &&\
+
+# Open fd 3 to a trace file 
+exec 3> func/${FULLID_folder}/nuisance/code_trace.txt
+BASH_XTRACEFD=3
+set -x #enable tracing
+
+#Print the ID of the subject (& session if available)
+printf "####$(echo ${FULLID_folder} | sed 's|/|: |')####\n$(date)\n\n"
+
+#create epi-distortion mask
+echo "Creating the nuisance timeseries for the WM and CSF signal..." &&\
+echo "  Creating an epi-distortion mask..." &&\
+
+##Create the WM mask
+echo "  Transforming WM mask to fMRI and extracting timeseries..." &&\
+
+#Extract WM mask from 5tt file
+fslroi anat/${FULLID_folder}/hsvs_5tt/${FULLID_file}_5tthsvs_anat_lesions.nii.gz \
+       func/${FULLID_folder}/nuisance/${FULLID_file}_5tthsvs_WMmask_anat.nii.gz \
+       2 1 &&\
+
+#erode the WM-mask & remove the brainstem and residual GM
+fslmaths func/${FULLID_folder}/nuisance/${FULLID_file}_5tthsvs_WMmask_anat.nii.gz \
+         -ero -bin \
+         func/${FULLID_folder}/nuisance/${FULLID_file}_5tthsvs_WMmask_anat_eroded.nii.gz &&\
+
+fslmaths anat/${FULLID_folder}/hsvs_5tt/${FULLID_file}_brainstem_anat.nii.gz \
+         -binv -mul func/${FULLID_folder}/nuisance/${FULLID_file}_5tthsvs_WMmask_anat_eroded.nii.gz \
+         func/${FULLID_folder}/nuisance/${FULLID_file}_5tthsvs_WMmask_anat_eroded_nobrainstem.nii.gz
+
+fslmaths anat/${FULLID_folder}/FS_to_t1/${FULLID_file}_vol_frac.cortex_t1_bin.nii.gz \
+         -binv -mul func/${FULLID_folder}/nuisance/${FULLID_file}_5tthsvs_WMmask_anat_eroded_nobrainstem.nii.gz \
+         func/${FULLID_folder}/nuisance/${FULLID_file}_5tthsvs_WMmask_anat_eroded_nobrainstem_noGM.nii.gz
+
+#linearly transform the WM_nofirst-mask to the functional data for all runs
+flirt -in func/${FULLID_folder}/nuisance/${FULLID_file}_5tthsvs_WMmask_anat_eroded_nobrainstem_noGM.nii.gz \
+      -applyxfm \
+      -init ${fmrifeat}/reg/highres2example_func.mat \
+      -ref ${fmrifeat}/example_func.nii.gz \
+      -out func/${FULLID_folder}/nuisance/${FULLID_file}_WMmask2func.nii.gz \
+      -interp nearestneighbour &&\
+
+#print average timeseries over all voxels in WM_nofirst-mask for all runs
+fslmeants -i func/${FULLID_folder}/ICA_AROMA/denoised_func_data_nonaggr.nii.gz \
+          -m func/${FULLID_folder}/nuisance/${FULLID_file}_WMmask2func.nii.gz \
+          -o func/${FULLID_folder}/nuisance/${FULLID_file}_wm_in_func_timeseries &&\
+
+##create the CSF mask
+echo "  Creating the CSF mask, registering it to fMRI, and extracting timeseries..." &&\
+
+#erode the ventricle-mask created by freesurfer
+mri_binarize --i anat/${FULLID_folder}/FS_to_t1/${FULLID_file}_aparc.a2009s+aseg_anat.nii.gz \
+             --o func/${FULLID_folder}/nuisance/${FULLID_file}_ventricles_anat.nii.gz --ventricles &&\
+
+fslmaths func/${FULLID_folder}/nuisance/${FULLID_file}_ventricles_anat.nii.gz \
+         -ero -bin func/${FULLID_folder}/nuisance/${FULLID_file}_ventricle_mask-nofirst.nii.gz &&\
+
+#linearly transform the ventricle-mask to the functional data for all runs
+flirt -in func/${FULLID_folder}/nuisance/${FULLID_file}_ventricle_mask-nofirst.nii.gz \
+      -applyxfm \
+      -init ${fmrifeat}/reg/highres2example_func.mat \
+      -ref ${fmrifeat}/example_func.nii.gz \
+      -out func/${FULLID_folder}/nuisance/${FULLID_file}_ventricle_mask-nofirst2func.nii.gz \
+      -interp nearestneighbour &&\
+
+#print average timeseries over all voxels in CSF_nofirst_ventr-mask for all runs
+fslmeants -i func/${FULLID_folder}/ICA_AROMA/denoised_func_data_nonaggr.nii.gz \
+          -m func/${FULLID_folder}/nuisance/${FULLID_file}_ventricle_mask-nofirst2func.nii.gz \
+          -o func/${FULLID_folder}/nuisance/${FULLID_file}_ventricles_in_func_timeseries &&\
+
+##combine timeseries into single file
+echo "  Combining WM and CSF timeseries for all runs..." &&\
+paste func/${FULLID_folder}/nuisance/${FULLID_file}_wm_in_func_timeseries \
+      func/${FULLID_folder}/nuisance/${FULLID_file}_ventricles_in_func_timeseries \
+      > func/${FULLID_folder}/nuisance/${FULLID_file}_nuisance_timeseries &&\
+
+printf "\n\n$(date)\n#### Done! ####\n"
